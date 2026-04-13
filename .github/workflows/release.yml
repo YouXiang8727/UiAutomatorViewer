@@ -1,0 +1,64 @@
+name: Release Build
+
+on:
+  push:
+    tags:
+      - 'v*' # 當 push v 開頭的 tag 時觸發
+
+jobs:
+  build-mac:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'zulu'
+          cache: 'gradle'
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
+
+      - name: Build macOS DMG and Zip
+        run: |
+          ./gradlew :composeApp:packageDmg
+          ./gradlew :composeApp:createDistributable
+          cd composeApp/build/compose/binaries/main/app
+          zip -r ../../../../../UiAutomatorViewer-mac-portable.zip .
+          cd ../../../../../
+
+      - name: Upload macOS Artifacts
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            composeApp/build/compose/binaries/main/dmg/*.dmg
+            UiAutomatorViewer-mac-portable.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'zulu'
+          cache: 'gradle'
+
+      - name: Build Windows EXE and Zip
+        run: |
+          ./gradlew :composeApp:packageExe
+          ./gradlew :composeApp:createDistributable
+          powershell Compress-Archive -Path composeApp/build/compose/binaries/main/app/* -DestinationPath UiAutomatorViewer-win-portable.zip
+
+      - name: Upload Windows Artifacts
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            composeApp/build/compose/binaries/main/exe/*.exe
+            UiAutomatorViewer-win-portable.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
