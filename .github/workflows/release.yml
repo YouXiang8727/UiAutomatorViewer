@@ -3,7 +3,11 @@ name: Release Build
 on:
   push:
     tags:
-      - 'v*' # 當 push v 開頭的 tag 時觸發
+      - 'v*'
+
+# 解決 403 錯誤：必須明確授予建立 Release 的權限
+permissions:
+  contents: write
 
 jobs:
   build-mac:
@@ -20,13 +24,13 @@ jobs:
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
 
-      - name: Build macOS DMG and Zip
+      - name: Build macOS DMG and Portable
         run: |
           ./gradlew :composeApp:packageDmg
           ./gradlew :composeApp:createDistributable
+          # 使用絕對路徑確保壓縮檔案在根目錄
           cd composeApp/build/compose/binaries/main/app
-          zip -r ../../../../../UiAutomatorViewer-mac-portable.zip .
-          cd ../../../../../
+          zip -r "${{ github.workspace }}/UiAutomatorViewer-mac-portable.zip" .
 
       - name: Upload macOS Artifacts
         uses: softprops/action-gh-release@v2
@@ -48,10 +52,11 @@ jobs:
           distribution: 'zulu'
           cache: 'gradle'
 
-      - name: Build Windows EXE and Zip
+      - name: Build Windows EXE and Portable
         run: |
           ./gradlew :composeApp:packageExe
           ./gradlew :composeApp:createDistributable
+          # Windows 使用 PowerShell 壓縮
           powershell Compress-Archive -Path composeApp/build/compose/binaries/main/app/* -DestinationPath UiAutomatorViewer-win-portable.zip
 
       - name: Upload Windows Artifacts
