@@ -28,11 +28,18 @@ import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.awt.Dimension
+import java.awt.Graphics
+import java.awt.Image
+import java.beans.PropertyChangeEvent
+import java.beans.PropertyChangeListener
 import java.io.File
 import java.io.FileInputStream
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.prefs.Preferences
+import javax.swing.ImageIcon
+import javax.swing.JComponent
 import javax.swing.JFileChooser
 import javax.swing.filechooser.FileFilter
 import javax.swing.filechooser.FileNameExtensionFilter
@@ -165,6 +172,7 @@ fun App() {
                         IconButton(onClick = {
                             val fileChooser = JFileChooser().apply {
                                 dialogTitle = "Open UI Dump (Must have matching PNG)"
+                                accessory = FilePreview(this)
                                 fileFilter = object : FileFilter() {
                                     override fun accept(f: File): Boolean {
                                         if (f.isDirectory) return true
@@ -185,16 +193,25 @@ fun App() {
                             
                             val result = fileChooser.showOpenDialog(null)
                             if (result == JFileChooser.APPROVE_OPTION) {
-                                val file = fileChooser.selectedFile
-                                updateLastDirectory(file)
+                                val selectedFile = fileChooser.selectedFile
+                                updateLastDirectory(selectedFile)
                                 scope.launch {
                                     isLoading = true
                                     withContext(Dispatchers.IO) {
-                                        val pngFile = File(file.absolutePath.substringBeforeLast(".") + ".png")
-                                        if (pngFile.exists()) {
-                                            screenshot = FileInputStream(pngFile).use { loadImageBitmap(it) }
+                                        val baseName = selectedFile.absolutePath.substringBeforeLast(".")
+                                        val ext = selectedFile.extension.lowercase()
+                                        
+                                        val (pngFile, dumpFile) = when (ext) {
+                                            "uix", "xml" -> {
+                                                File("$baseName.png") to selectedFile
+                                            }
+                                            else -> null to null
                                         }
-                                        rootNode = AdbUtils.parseXmlFile(file)
+
+                                        screenshot = pngFile?.takeIf { it.exists() }?.let {
+                                            try { FileInputStream(it).use { stream -> loadImageBitmap(stream) } } catch (e: Exception) { null }
+                                        }
+                                        rootNode = dumpFile?.let { AdbUtils.parseXmlFile(it) }
                                     }
                                     isLoading = false
                                 }
@@ -434,5 +451,63 @@ fun DetailItem(label: String, value: String) {
     Row(modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)) {
         Text(text = "$label: ", modifier = Modifier.width(100.dp), style = MaterialTheme.typography.labelMedium)
         Text(text = value, style = MaterialTheme.typography.bodySmall)
+    }
+}
+
+private class FilePreview(fc: JFileChooser) : JComponent(), PropertyChangeListener {
+    private var thumbnail: ImageIcon? = null
+    private var file: File? = null
+
+    init {
+        preferredSize = Dimension(250, 250)
+        fc.addPropertyChangeListener(this)
+    }
+
+    private fun loadImage() {
+        if (file == null || file!!.isDirectory) {
+            thumbnail = null
+            return
+        }
+
+        val path = file!!.absolutePath
+        val pngFile = when (file!!.extension.lowercase()) {
+            "uix", "xml" -> File(path.substringBeforeLast(".") + ".png")
+            else -> null
+        }
+
+        if (pngFile != null && pngFile.exists()) {
+            val tmpIcon = ImageIcon(pngFile.path)
+            if (tmpIcon.iconWidth > 240 || tmpIcon.iconHeight > 240) {
+                val scale = 240f / maxOf(tmpIcon.iconWidth, tmpIcon.iconHeight)
+                val newW = (tmpIcon.iconWidth * scale).toInt()
+                val newH = (tmpIcon.iconHeight * scale).toInt()
+                thumbnail = ImageIcon(tmpIcon.image.getScaledInstance(newW, newH, Image.SCALE_SMOOTH))
+            } else {
+                thumbnail = tmpIcon
+            }
+        } else {
+            thumbnail = null
+        }
+    }
+
+    override fun propertyChange(e: PropertyChangeEvent) {
+        if (JFileChooser.SELECTED_FILE_CHANGED_PROPERTY == e.propertyName) {
+            file = e.newValue as? File
+            if (isShowing) {
+                loadImage()
+                repaint()
+            }
+        }
+    }
+
+    override fun paintComponent(g: Graphics) {
+        if (thumbnail == null) {
+            loadImage()
+        }
+        thumbnail?.let {
+            val x = width / 2 - it.iconWidth / 2
+            val y = height / 2 - it.iconHeight / 2
+            it.paintIcon(this, g, maxOf(x, 0), maxOf(y, 0))
+        }
     }
 }
