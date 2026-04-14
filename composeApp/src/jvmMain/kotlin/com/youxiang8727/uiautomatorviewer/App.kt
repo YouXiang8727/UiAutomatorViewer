@@ -318,15 +318,22 @@ fun ScreenshotView(
 
 private fun findSmallestNodeAt(node: UiNode, x: Float, y: Float): UiNode? {
     if (!node.bounds.contains(Offset(x, y))) return null
-    
-    var smallest = node
+
+    var smallestNode = node
+    var smallestArea = node.bounds.width * node.bounds.height
+
     for (child in node.children) {
         val found = findSmallestNodeAt(child, x, y)
         if (found != null) {
-            smallest = found
+            val foundArea = found.bounds.width * found.bounds.height
+            // 如果找到的節點面積更小，或者面積相等（代表更深層或更後面的節點），則選取它
+            if (foundArea <= smallestArea) {
+                smallestNode = found
+                smallestArea = foundArea
+            }
         }
     }
-    return smallest
+    return smallestNode
 }
 
 @Composable
