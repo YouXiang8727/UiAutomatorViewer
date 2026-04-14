@@ -40,7 +40,7 @@ compose.desktop {
         nativeDistributions {
             targetFormats(TargetFormat.Dmg, TargetFormat.Msi, TargetFormat.Exe, TargetFormat.Deb)
             packageName = "com.youxiang8727.uiautomatorviewer"
-            packageVersion = "1.0.0"
+            packageVersion = "1.0.1"
         }
     }
 }
