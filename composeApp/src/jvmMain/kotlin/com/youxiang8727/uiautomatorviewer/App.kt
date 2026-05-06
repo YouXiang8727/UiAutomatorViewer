@@ -4,6 +4,7 @@ import androidx.compose.foundation.*
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
@@ -12,17 +13,14 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.*
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.input.pointer.PointerIcon
-import androidx.compose.ui.input.pointer.pointerHoverIcon
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.loadImageBitmap
-import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.Dispatchers
@@ -30,7 +28,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.awt.Dimension
 import java.awt.Graphics
-import java.awt.Image
+import java.awt.Image as AwtImage
 import java.beans.PropertyChangeEvent
 import java.beans.PropertyChangeListener
 import java.io.File
@@ -60,6 +58,32 @@ fun App() {
     val prefs = remember { Preferences.userRoot().node("com.youxiang8727.uiautomatorviewer") }
     var lastDirectory by remember { mutableStateOf(prefs.get("last_directory", ".")) }
 
+    // Search and Tree State
+    var searchQuery by remember { mutableStateOf("") }
+    var searchResults by remember { mutableStateOf(listOf<UiNode>()) }
+    var currentSearchIndex by remember { mutableStateOf(-1) }
+    val expandedNodes = remember { mutableStateMapOf<UiNode, Boolean>() }
+
+    val parentMap = remember(rootNode) {
+        val map = mutableMapOf<UiNode, UiNode>()
+        fun walk(node: UiNode) {
+            node.children.forEach {
+                map[it] = node
+                walk(it)
+            }
+        }
+        rootNode?.let { walk(it) }
+        map
+    }
+
+    fun expandNodeAndParents(node: UiNode) {
+        var current = parentMap[node]
+        while (current != null) {
+            expandedNodes[current] = true
+            current = parentMap[current]
+        }
+    }
+
     fun updateLastDirectory(file: File) {
         val dir = if (file.isDirectory) file.absolutePath else file.parentFile.absolutePath
         lastDirectory = dir
@@ -73,6 +97,14 @@ fun App() {
             devices = AdbUtils.listDevices()
             if (devices.isNotEmpty()) selectedDevice = devices[0]
         }
+    }
+
+    LaunchedEffect(rootNode) {
+        selectedNode = null
+        searchQuery = ""
+        searchResults = emptyList()
+        currentSearchIndex = -1
+        expandedNodes.clear()
     }
 
     MaterialTheme {
@@ -234,6 +266,7 @@ fun App() {
                         screenshot?.let { bitmap ->
                             ScreenshotView(bitmap, rootNode, selectedNode) {
                                 selectedNode = it
+                                expandNodeAndParents(it)
                             }
                         } ?: Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                             val msg = if (selectedDevice == null) "Connect device or load saved dump" else "No screenshot. Click capture to fetch."
@@ -245,9 +278,59 @@ fun App() {
 
                     // Right: Hierarchy and Details
                     Column(modifier = Modifier.weight(0.4f).fillMaxHeight()) {
+                        // Search Bar
+                        OutlinedTextField(
+                            value = searchQuery,
+                            onValueChange = {
+                                searchQuery = it
+                                searchResults = findAllNodes(rootNode, it)
+                                currentSearchIndex = if (searchResults.isNotEmpty()) 0 else -1
+                                if (currentSearchIndex != -1) {
+                                    val node = searchResults[currentSearchIndex]
+                                    expandNodeAndParents(node)
+                                    selectedNode = node
+                                }
+                            },
+                            modifier = Modifier.fillMaxWidth().padding(8.dp),
+                            placeholder = { Text("Search nodes...") },
+                            trailingIcon = {
+                                if (searchQuery.isNotEmpty()) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Text(
+                                            "${if (searchResults.isEmpty()) 0 else currentSearchIndex + 1}/${searchResults.size}",
+                                            style = MaterialTheme.typography.labelSmall
+                                        )
+                                        IconButton(onClick = {
+                                            if (searchResults.isNotEmpty()) {
+                                                currentSearchIndex = (currentSearchIndex - 1 + searchResults.size) % searchResults.size
+                                                val node = searchResults[currentSearchIndex]
+                                                expandNodeAndParents(node)
+                                                selectedNode = node
+                                            }
+                                        }) { Icon(Icons.Default.KeyboardArrowUp, null) }
+                                        IconButton(onClick = {
+                                            if (searchResults.isNotEmpty()) {
+                                                currentSearchIndex = (currentSearchIndex + 1) % searchResults.size
+                                                val node = searchResults[currentSearchIndex]
+                                                expandNodeAndParents(node)
+                                                selectedNode = node
+                                            }
+                                        }) { Icon(Icons.Default.KeyboardArrowDown, null) }
+                                        IconButton(onClick = {
+                                            searchQuery = ""
+                                            searchResults = emptyList()
+                                            currentSearchIndex = -1
+                                        }) { Icon(Icons.Default.Close, null) }
+                                    }
+                                }
+                            },
+                            singleLine = true,
+                            textStyle = androidx.compose.ui.text.TextStyle(fontSize = 14.sp)
+                        )
+
                         Box(modifier = Modifier.weight(0.6f)) {
                             rootNode?.let { node ->
-                                HierarchyTree(node, selectedNode) {
+                                HierarchyTree(node, selectedNode, expandedNodes) {
                                     selectedNode = it
                                 }
                             } ?: Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -265,104 +348,50 @@ fun App() {
     }
 }
 
+private data class FlattenedNode(val node: UiNode, val depth: Int)
+
 @Composable
-fun ScreenshotView(
-    bitmap: ImageBitmap,
-    rootNode: UiNode?,
+fun HierarchyTree(
+    root: UiNode,
     selectedNode: UiNode?,
+    expandedNodes: MutableMap<UiNode, Boolean>,
     onNodeSelected: (UiNode) -> Unit
 ) {
-    var canvasSize by remember { mutableStateOf(IntSize.Zero) }
-    
-    val containerAspectRatio = if (canvasSize.height > 0) canvasSize.width.toFloat() / canvasSize.height else 1f
-    val bitmapAspectRatio = bitmap.width.toFloat() / bitmap.height
-    
-    val (displayedWidth, displayedHeight) = if (containerAspectRatio > bitmapAspectRatio) {
-        val h = canvasSize.height.toFloat()
-        val w = h * bitmapAspectRatio
-        w to h
-    } else {
-        val w = canvasSize.width.toFloat()
-        val h = w / bitmapAspectRatio
-        w to h
-    }
-
-    val offsetX = (canvasSize.width - displayedWidth) / 2
-    val offsetY = (canvasSize.height - displayedHeight) / 2
-    
-    val scaleX = displayedWidth / bitmap.width
-    val scaleY = displayedHeight / bitmap.height
-
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .onGloballyPositioned { canvasSize = it.size }
-            .pointerHoverIcon(PointerIcon.Crosshair)
-            .pointerInput(rootNode, bitmap, canvasSize) {
-                detectTapGestures { offset ->
-                    rootNode?.let { root ->
-                        val imageX = (offset.x - offsetX) / scaleX
-                        val imageY = (offset.y - offsetY) / scaleY
-                        findSmallestNodeAt(root, imageX, imageY)?.let {
-                            onNodeSelected(it)
-                        }
-                    }
-                }
-            }
-    ) {
-        Image(
-            bitmap = bitmap,
-            contentDescription = null,
-            modifier = Modifier.fillMaxSize(),
-            contentScale = ContentScale.Fit
-        )
-
-        Canvas(modifier = Modifier.fillMaxSize()) {
-            selectedNode?.bounds?.let { bounds ->
-                drawRect(
-                    color = Color.Red,
-                    topLeft = Offset(bounds.left * scaleX + offsetX, bounds.top * scaleY + offsetY),
-                    size = androidx.compose.ui.geometry.Size(
-                        (bounds.right - bounds.left) * scaleX,
-                        (bounds.bottom - bounds.top) * scaleY
-                    ),
-                    style = Stroke(width = 2f)
-                )
-            }
-        }
-    }
-}
-
-private fun findSmallestNodeAt(node: UiNode, x: Float, y: Float): UiNode? {
-    if (!node.bounds.contains(Offset(x, y))) return null
-
-    var smallestNode = node
-    var smallestArea = node.bounds.width * node.bounds.height
-
-    for (child in node.children) {
-        val found = findSmallestNodeAt(child, x, y)
-        if (found != null) {
-            val foundArea = found.bounds.width * found.bounds.height
-            // 如果找到的節點面積更小，或者面積相等（代表更深層或更後面的節點），則選取它
-            if (foundArea <= smallestArea) {
-                smallestNode = found
-                smallestArea = foundArea
-            }
-        }
-    }
-    return smallestNode
-}
-
-@Composable
-fun HierarchyTree(root: UiNode, selectedNode: UiNode?, onNodeSelected: (UiNode) -> Unit) {
-    val expandedNodes = remember { mutableStateMapOf<UiNode, Boolean>() }
     val state = rememberLazyListState()
     val horizontalScrollState = rememberScrollState()
 
+    val visibleNodes = remember(root, expandedNodes.toMap()) {
+        val list = mutableListOf<FlattenedNode>()
+        fun walk(node: UiNode, depth: Int) {
+            list.add(FlattenedNode(node, depth))
+            if (expandedNodes[node] ?: true) {
+                node.children.forEach { walk(it, depth + 1) }
+            }
+        }
+        walk(root, 0)
+        list
+    }
+
+    LaunchedEffect(selectedNode) {
+        selectedNode?.let { node ->
+            val index = visibleNodes.indexOfFirst { it.node == node }
+            if (index != -1) {
+                state.animateScrollToItem(index)
+            }
+        }
+    }
+
     Box(modifier = Modifier.fillMaxSize()) {
         LazyColumn(state = state, modifier = Modifier.fillMaxSize().horizontalScroll(horizontalScrollState).padding(8.dp)) {
-            item {
-                TreeNode(root, 0, expandedNodes, selectedNode, onNodeSelected)
+            items(visibleNodes) { flattened ->
+                TreeRow(
+                    node = flattened.node,
+                    depth = flattened.depth,
+                    isExpanded = expandedNodes[flattened.node] ?: true,
+                    isSelected = flattened.node == selectedNode,
+                    onNodeSelected = onNodeSelected,
+                    onToggleExpand = { expandedNodes[flattened.node] = !(expandedNodes[flattened.node] ?: true) }
+                )
             }
         }
         VerticalScrollbar(
@@ -373,42 +402,50 @@ fun HierarchyTree(root: UiNode, selectedNode: UiNode?, onNodeSelected: (UiNode) 
 }
 
 @Composable
-fun TreeNode(
+fun TreeRow(
     node: UiNode,
     depth: Int,
-    expandedNodes: MutableMap<UiNode, Boolean>,
-    selectedNode: UiNode?,
-    onNodeSelected: (UiNode) -> Unit
+    isExpanded: Boolean,
+    isSelected: Boolean,
+    onNodeSelected: (UiNode) -> Unit,
+    onToggleExpand: () -> Unit
 ) {
-    val isExpanded = expandedNodes[node] ?: true
-    
-    Column {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clickable { onNodeSelected(node) }
-                .background(if (node == selectedNode) MaterialTheme.colorScheme.primaryContainer else Color.Transparent)
-                .padding(start = (depth * 16).dp, top = 2.dp, bottom = 2.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            if (node.children.isNotEmpty()) {
-                Text(
-                    text = if (isExpanded) "▼ " else "▶ ",
-                    modifier = Modifier.clickable { expandedNodes[node] = !isExpanded },
-                    fontSize = 12.sp
-                )
-            } else {
-                Spacer(modifier = Modifier.width(16.dp))
-            }
-            Text(text = node.getDisplayName(), fontSize = 12.sp, maxLines = 1, softWrap = false)
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { onNodeSelected(node) }
+            .background(if (isSelected) MaterialTheme.colorScheme.primaryContainer else Color.Transparent)
+            .padding(start = (depth * 16).dp, top = 2.dp, bottom = 2.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        if (node.children.isNotEmpty()) {
+            Text(
+                text = if (isExpanded) "▼ " else "▶ ",
+                modifier = Modifier.clickable { onToggleExpand() },
+                fontSize = 12.sp
+            )
+        } else {
+            Spacer(modifier = Modifier.width(16.dp))
         }
-        
-        if (isExpanded) {
-            node.children.forEach { child ->
-                TreeNode(child, depth + 1, expandedNodes, selectedNode, onNodeSelected)
-            }
-        }
+        Text(text = node.getDisplayName(), fontSize = 12.sp, maxLines = 1, softWrap = false)
     }
+}
+
+private fun findAllNodes(root: UiNode?, query: String): List<UiNode> {
+    if (root == null || query.isBlank()) return emptyList()
+    val results = mutableListOf<UiNode>()
+    fun walk(node: UiNode) {
+        val match = node.text.contains(query, ignoreCase = true) ||
+                node.resourceId.contains(query, ignoreCase = true) ||
+                node.contentDesc.contains(query, ignoreCase = true) ||
+                node.className.contains(query, ignoreCase = true)
+        if (match) {
+            results.add(node)
+        }
+        node.children.forEach { walk(it) }
+    }
+    walk(root)
+    return results
 }
 
 @Composable
@@ -454,6 +491,87 @@ fun DetailItem(label: String, value: String) {
     }
 }
 
+@Composable
+fun ScreenshotView(
+    bitmap: ImageBitmap,
+    rootNode: UiNode?,
+    selectedNode: UiNode?,
+    onNodeSelected: (UiNode) -> Unit
+) {
+    BoxWithConstraints(
+        modifier = Modifier.fillMaxSize(),
+        contentAlignment = Alignment.Center
+    ) {
+        val imageWidth = bitmap.width.toFloat()
+        val imageHeight = bitmap.height.toFloat()
+
+        val scale = minOf(
+            constraints.maxWidth.toFloat() / imageWidth,
+            constraints.maxHeight.toFloat() / imageHeight
+        )
+
+        val dw = imageWidth * scale
+        val dh = imageHeight * scale
+
+        val density = LocalDensity.current
+
+        Box(
+            modifier = Modifier
+                .size(with(density) { dw.toDp() }, with(density) { dh.toDp() })
+                .pointerInput(rootNode, scale) {
+                    detectTapGestures { offset ->
+                        val x = offset.x / scale
+                        val y = offset.y / scale
+                        findNodeAt(rootNode, x, y)?.let { onNodeSelected(it) }
+                    }
+                }
+        ) {
+            Image(
+                bitmap = bitmap,
+                contentDescription = null,
+                modifier = Modifier.fillMaxSize(),
+                contentScale = ContentScale.Fit
+            )
+
+            Canvas(modifier = Modifier.fillMaxSize()) {
+                selectedNode?.let { node ->
+                    val rect = node.bounds
+                    val left = rect.left * scale
+                    val top = rect.top * scale
+                    val width = rect.width * scale
+                    val height = rect.height * scale
+
+                    drawRect(
+                        color = Color.Red,
+                        topLeft = Offset(left, top),
+                        size = Size(width, height),
+                        style = Stroke(width = 2.dp.toPx())
+                    )
+
+                    drawRect(
+                        color = Color.Red.copy(alpha = 0.1f),
+                        topLeft = Offset(left, top),
+                        size = Size(width, height)
+                    )
+                }
+            }
+        }
+    }
+}
+
+private fun findNodeAt(root: UiNode?, x: Float, y: Float): UiNode? {
+    if (root == null) return null
+    var bestMatch: UiNode? = null
+    fun walk(node: UiNode) {
+        if (node.bounds.contains(Offset(x, y))) {
+            bestMatch = node
+            node.children.forEach { walk(it) }
+        }
+    }
+    walk(root)
+    return bestMatch
+}
+
 private class FilePreview(fc: JFileChooser) : JComponent(), PropertyChangeListener {
     private var thumbnail: ImageIcon? = null
     private var file: File? = null
@@ -471,6 +589,7 @@ private class FilePreview(fc: JFileChooser) : JComponent(), PropertyChangeListen
 
         val path = file!!.absolutePath
         val pngFile = when (file!!.extension.lowercase()) {
+            "png" -> file
             "uix", "xml" -> File(path.substringBeforeLast(".") + ".png")
             else -> null
         }
@@ -481,7 +600,7 @@ private class FilePreview(fc: JFileChooser) : JComponent(), PropertyChangeListen
                 val scale = 240f / maxOf(tmpIcon.iconWidth, tmpIcon.iconHeight)
                 val newW = (tmpIcon.iconWidth * scale).toInt()
                 val newH = (tmpIcon.iconHeight * scale).toInt()
-                thumbnail = ImageIcon(tmpIcon.image.getScaledInstance(newW, newH, Image.SCALE_SMOOTH))
+                thumbnail = ImageIcon(tmpIcon.image.getScaledInstance(newW, newH, AwtImage.SCALE_SMOOTH))
             } else {
                 thumbnail = tmpIcon
             }
